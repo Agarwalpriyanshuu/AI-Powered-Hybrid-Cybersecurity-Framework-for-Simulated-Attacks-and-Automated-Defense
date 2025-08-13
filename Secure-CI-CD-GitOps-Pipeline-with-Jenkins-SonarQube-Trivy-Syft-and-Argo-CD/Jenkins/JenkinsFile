@@ -1,0 +1,77 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git branch: 'dev', url: 'https://github.com/user/repo.git'
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                sh 'pytest'
+            }
+        }
+
+        stage('Bandit Scan') {
+            steps {
+                sh './scripts/run_bandit.sh'
+            }
+        }
+
+        stage('Dependency Check') {
+            steps {
+                sh './scripts/run_dependency_check.sh'
+            }
+        }
+
+        stage('SonarQube Scan') {
+            environment {
+                SONAR_TOKEN = credentials('sonarqube-token')
+            }
+            steps {
+                sh 'sonar-scanner'
+                waitUntil {
+                    script {
+                        return true
+                    }
+                }
+            }
+        }
+
+        stage('Docker Build & Trivy Scan') {
+            steps {
+                sh 'docker build -t myapp:latest .'
+                sh 'trivy image --format json -o trivy-report/image_scan.json myapp:latest'
+            }
+        }
+
+        stage('Generate SBOM and Push') {
+            steps {
+                sh './scripts/generate_sbom.sh'
+                sh './scripts/push_sbom_to_dependency_track.sh'
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub', usernameVariable: 'DOCKER_USER', passwordVariable: 'DOCKER_PASS')]) {
+                    sh '''
+                    echo "$DOCKER_PASS" | docker login -u "$DOCKER_USER" --password-stdin
+                    docker tag myapp:latest mydockerhub/myapp:latest
+                    docker push mydockerhub/myapp:latest
+                    '''
+                }
+            }
+        }
+
+        stage('Merge Dev to Master') {
+            steps {
+                sshagent(['github-ssh']) {
+                    sh 'git checkout master && git merge dev && git push origin master'
+                }
+            }
+        }
+    }
+}
